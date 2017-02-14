@@ -1,0 +1,784 @@
+From 72a7487e51023d0ccbd91289a1c50ed726985c19 Mon Sep 17 00:00:00 2001
+From: Wei Chen <Jedix81@live.com>
+Date: Mon, 9 Jan 2017 02:24:39 +0000
+Subject: [PATCH] temp porting for ARM64
+
+Signed-off-by: Wei Chen <Jedix81@live.com>
+---
+ Makefile.common          |   4 +-
+ kernel/Makefile          |   1 -
+ kernel/cpu.S             |  26 +++------
+ kernel/cpu_vectors.S     |  20 +------
+ kernel/intr.c            |  75 +-----------------------
+ kernel/kernel.h          |  60 ++++++++++++++++++++
+ kernel/pvclock.c         |  47 +++------------
+ kernel/virtio/boot.S     | 145 ++---------------------------------------------
+ kernel/virtio/tscclock.c |   5 +-
+ solo5-kernel-ukvm.opam   |   2 +-
+ ukvm/ukvm-core.c         |  84 +++++++--------------------
+ 11 files changed, 113 insertions(+), 356 deletions(-)
+
+diff --git a/Makefile.common b/Makefile.common
+index ba36e50..c9d2850 100644
+--- a/Makefile.common
++++ b/Makefile.common
+@@ -10,7 +10,9 @@ OBJCOPY=objcopy
+ include $(TOP)/Makeconf
+
+ # Exported to OPAM via pkg-config.
+-MD_CFLAGS=$(HOST_CFLAGS) -ffreestanding -mno-red-zone
++#MD_CFLAGS=$(HOST_CFLAGS) -ffreestanding -mno-red-zone
++MD_CFLAGS=$(HOST_CFLAGS) -ffreestanding
++
+ # Likewise.
+ LDFLAGS=-nostdlib -z max-page-size=0x1000 -static
+ # CFLAGS used for building kernel/ and in-tree tests.
+diff --git a/kernel/Makefile b/kernel/Makefile
+index a8a7e5d..2fa6b05 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -20,7 +20,6 @@ include $(TOP)/Makefile.common
+ COMMON_COBJS=\
+ abort.o \
+ cpu.o \
+-cpu_vectors.o \
+ ee_printf.o \
+ intr.o \
+ lib.o \
+diff --git a/kernel/cpu.S b/kernel/cpu.S
+index 2dd41ad..2651a73 100644
+--- a/kernel/cpu.S
++++ b/kernel/cpu.S
+@@ -19,45 +19,33 @@
+ #define END(x)   .size x, . - x
+
+ .text
+-.code64
++####.code64
+
+ ENTRY(cpu_halt)
+-    cli
+-    hlt
+-    jmp cpu_halt
++    nop
+ END(cpu_halt)
+
+ ENTRY(cpu_rdtsc)
+-    rdtsc
+-    shl $32, %rdx
+-    add %rdx, %rax
++    nop
+     ret
+ END(cpu_rdtsc)
+
+ ENTRY(cpu_idt_load)
+-    lidt 0(%rdi)
++    nop
+     ret
+ END(cpu_idt_load)
+
+ ENTRY(cpu_gdt_load)
+-    lgdt 0(%rdi)
++    nop
+     ret
+ END(cpu_gdt_load)
+
+ ENTRY(cpu_tss_load)
+-    ltr %di
++    nop
+     ret
+ END(cpu_tss_load)
+
+ ENTRY(cpu_sse_enable)
+-    mov %cr0, %rax
+-    and $0xfffb, %ax                    /* clear CR0.EM */
+-    or $0x2, %ax                        /* set CR0.MP */
+-    mov %rax, %cr0
+-
+-    mov %cr4, %rax
+-    or $(3<<9), %ax                     /* set CR4.OSFXSR and CR4.OSXMMEXCPT */
+-    mov %rax, %cr4
+-
++    nop
+     ret
+ END(cpu_sse_enable)
+diff --git a/kernel/cpu_vectors.S b/kernel/cpu_vectors.S
+index 76b83d4..80493f6 100644
+--- a/kernel/cpu_vectors.S
++++ b/kernel/cpu_vectors.S
+@@ -16,27 +16,11 @@
+ # PERFORMANCE OF THIS SOFTWARE.
+
+ .macro PUSH_CALLER_SAVE
+-    pushq %rax
+-    pushq %rdi
+-    pushq %rsi
+-    pushq %rdx
+-    pushq %rcx
+-    pushq %r8
+-    pushq %r9
+-    pushq %r10
+-    pushq %r11
++    nop
+ .endm
+
+ .macro POP_CALLER_SAVE
+-    popq %r11
+-    popq %r10
+-    popq %r9
+-    popq %r8
+-    popq %rcx
+-    popq %rdx
+-    popq %rsi
+-    popq %rdi
+-    popq %rax
++    nop
+ .endm
+
+ .macro TRAP_ENTRY trapno, has_ec
+diff --git a/kernel/intr.c b/kernel/intr.c
+index dbba8ea..c82e8af 100644
+--- a/kernel/intr.c
++++ b/kernel/intr.c
+@@ -38,79 +38,13 @@ struct idtptr {
+     uint64_t base;
+ } __attribute__((packed));
+
+-static struct idt_gate_desc cpu_idt[IDT_NUM_ENTRIES] ALIGN_64_BIT;
+-
+-static void idt_fillgate(unsigned num, void *fun, unsigned ist)
+-{
+-    struct idt_gate_desc *desc = &cpu_idt[num];
+-
+-    /*
+-     * All gates are interrupt gates, all handlers run with interrupts off.
+-     */
+-    desc->offset_hi = (uint64_t)fun >> 16;
+-    desc->offset_lo = (uint64_t)fun & 0xffff;
+-    desc->selector = GDT_DESC_OFFSET(GDT_DESC_CODE);
+-    desc->ist = ist;
+-    desc->type = 0b1110;
+-    desc->dpl = 0;
+-    desc->p = 1;
+-}
+-
+ static void idt_init(void)
+ {
+     /*
+      * Load trap vectors. All traps run on IST2 (cpu_trap_stack), except for
+      * the exceptions.
+      */
+-#define FILL_TRAP_GATE(num, ist) extern void cpu_trap_##num(void); \
+-    idt_fillgate(num, cpu_trap_##num, ist)
+-    FILL_TRAP_GATE(0, 2);
+-    FILL_TRAP_GATE(1, 2);
+-    FILL_TRAP_GATE(2, 3); /* #NMI runs on IST3 (cpu_nmi_stack) */
+-    FILL_TRAP_GATE(3, 2);
+-    FILL_TRAP_GATE(4, 2);
+-    FILL_TRAP_GATE(5, 2);
+-    FILL_TRAP_GATE(6, 2);
+-    FILL_TRAP_GATE(7, 2);
+-    FILL_TRAP_GATE(8, 3); /* #DF runs on IST3 (cpu_nmi_stack) */
+-    FILL_TRAP_GATE(10, 2);
+-    FILL_TRAP_GATE(11, 2);
+-    FILL_TRAP_GATE(12, 2);
+-    FILL_TRAP_GATE(13, 2);
+-    FILL_TRAP_GATE(14, 2);
+-    FILL_TRAP_GATE(16, 2);
+-    FILL_TRAP_GATE(17, 2);
+-    FILL_TRAP_GATE(18, 2);
+-    FILL_TRAP_GATE(19, 2);
+-    FILL_TRAP_GATE(20, 2);
+-
+-    /*
+-     * Load irq vectors. All irqs run on IST1 (cpu_intr_stack).
+-     */
+-#define FILL_IRQ_GATE(num, ist) extern void cpu_irq_##num(void); \
+-    idt_fillgate(32 + num, cpu_irq_##num, ist)
+-    FILL_IRQ_GATE(0, 1);
+-    FILL_IRQ_GATE(1, 1);
+-    FILL_IRQ_GATE(2, 1);
+-    FILL_IRQ_GATE(3, 1);
+-    FILL_IRQ_GATE(4, 1);
+-    FILL_IRQ_GATE(5, 1);
+-    FILL_IRQ_GATE(6, 1);
+-    FILL_IRQ_GATE(7, 1);
+-    FILL_IRQ_GATE(8, 1);
+-    FILL_IRQ_GATE(9, 1);
+-    FILL_IRQ_GATE(10, 1);
+-    FILL_IRQ_GATE(11, 1);
+-    FILL_IRQ_GATE(12, 1);
+-    FILL_IRQ_GATE(13, 1);
+-    FILL_IRQ_GATE(14, 1);
+-    FILL_IRQ_GATE(15, 1);
+-
+-    struct idtptr idtptr;
+-
+-    idtptr.limit = sizeof(cpu_idt) - 1;
+-    idtptr.base = (uint64_t) &cpu_idt;
+-    cpu_idt_load((uint64_t) &idtptr);
++    return;
+ }
+
+ struct tss {
+@@ -146,8 +80,7 @@ static char cpu_nmi_stack[4096];  /* IST3 */
+
+ static void tss_init(void)
+ {
+-    extern uint64_t cpu_gdt64[];
+-    struct tss_desc *td = (void *)&cpu_gdt64[GDT_DESC_TSS_LO];
++    struct tss_desc *td = (void *)0xfffffff;
+
+     cpu_tss.ist[0] = (uint64_t)&cpu_intr_stack[sizeof cpu_intr_stack];
+     cpu_tss.ist[1] = (uint64_t)&cpu_trap_stack[sizeof cpu_trap_stack];
+@@ -246,14 +179,10 @@ int intr_depth = 1;
+
+ void intr_disable(void)
+ {
+-    __asm__ __volatile__("cli");
+     intr_depth++;
+ }
+
+ void intr_enable(void)
+ {
+     assert(intr_depth > 0);
+-
+-    if (--intr_depth == 0)
+-        __asm__ __volatile__("sti");
+ }
+diff --git a/kernel/kernel.h b/kernel/kernel.h
+index 8524ba8..0fe1a1c 100644
+--- a/kernel/kernel.h
++++ b/kernel/kernel.h
+@@ -136,6 +136,64 @@ uint64_t pvclock_monotonic(void);
+ uint64_t pvclock_epochoffset(void);
+
+ /* accessing devices via port space */
++#define CONFIG_ARM64 1
++#ifdef CONFIG_ARM64
++
++static inline void outb(uint16_t addr, uint8_t val)
++{
++	asm volatile("strb %w0, [%1]" : : "rZ" (val), "r" (addr));
++}
++
++static inline void outw(uint16_t addr, uint16_t val)
++{
++	asm volatile("strh %w0, [%1]" : : "rZ" (val), "r" (addr));
++}
++
++static inline void outl(uint16_t addr, uint32_t val)
++{
++	asm volatile("str %w0, [%1]" : : "rZ" (val), "r" (addr));
++}
++
++static inline void outq(uint16_t addr, uint64_t val)
++{
++	asm volatile("str %x0, [%1]" : : "rZ" (val), "r" (addr));
++}
++
++static inline uint8_t inb(const uint16_t addr)
++{
++	uint8_t val;
++	asm volatile("ldrb %w0, [%1]" : "=r" (val) : "r" (addr));
++	return val;
++}
++
++static inline uint16_t inw(const uint16_t addr)
++{
++	uint16_t val;
++
++	asm volatile("ldrh %w0, [%1]" : "=r" (val) : "r" (addr));
++	return val;
++}
++
++static inline uint32_t inl(const uint16_t addr)
++{
++	uint32_t val;
++	asm volatile("ldr %w0, [%1]" : "=r" (val) : "r" (addr));
++	return val;
++}
++
++static inline uint64_t inq(const uint16_t addr)
++{
++	uint64_t val;
++	asm volatile("ldr %0, [%1]" : "=r" (val) : "r" (addr));
++	return val;
++}
++
++static inline uint64_t mul64_32(uint64_t a, uint32_t b)
++{
++    return a * b;
++}
++
++#else
+
+ static inline void outb(uint16_t port, uint8_t v)
+ {
+@@ -196,6 +254,8 @@ static inline uint64_t mul64_32(uint64_t a, uint32_t b)
+     return prod;
+ }
+
++#endif
++
+ /* compiler-only memory "barrier" */
+ #define cc_barrier() __asm__ __volatile__("" : : : "memory")
+
+diff --git a/kernel/pvclock.c b/kernel/pvclock.c
+index 46944f6..a358fb3 100644
+--- a/kernel/pvclock.c
++++ b/kernel/pvclock.c
+@@ -61,17 +61,10 @@ static inline void
+ x86_cpuid(uint32_t level, uint32_t *eax_out, uint32_t *ebx_out,
+         uint32_t *ecx_out, uint32_t *edx_out)
+ {
+-    uint32_t eax_, ebx_, ecx_, edx_;
+-
+-    __asm__(
+-        "cpuid"
+-        : "=a" (eax_), "=b" (ebx_), "=c" (ecx_), "=d" (edx_)
+-        : "0" (level)
+-    );
+-    *eax_out = eax_;
+-    *ebx_out = ebx_;
+-    *ecx_out = ecx_;
+-    *edx_out = edx_;
++    *eax_out = level;
++    *ebx_out = 2;
++    *ecx_out = 3;
++    *edx_out = 4;
+ }
+
+ uint64_t pvclock_monotonic(void) {
+@@ -80,7 +73,6 @@ uint64_t pvclock_monotonic(void) {
+
+     do {
+         version = pvclock_ti.version;
+-        __asm__ ("mfence" ::: "memory");
+         delta = cpu_rdtsc() - pvclock_ti.tsc_timestamp;
+         if (pvclock_ti.tsc_shift < 0)
+             delta >>= -pvclock_ti.tsc_shift;
+@@ -88,7 +80,7 @@ uint64_t pvclock_monotonic(void) {
+             delta <<= pvclock_ti.tsc_shift;
+         time_now = mul64_32(delta, pvclock_ti.tsc_to_system_mul) +
+             pvclock_ti.system_time;
+-        __asm__ ("mfence" ::: "memory");
++
+     } while ((pvclock_ti.version & 1) || (pvclock_ti.version != version));
+
+     return time_now;
+@@ -104,10 +96,10 @@ static uint64_t pvclock_read_wall_clock(void)
+
+ 	do {
+ 		version = pvclock_wc.version;
+-		__asm__ ("mfence" ::: "memory");
++
+ 		wc_boot = pvclock_wc.sec * NSEC_PER_SEC;
+ 		wc_boot += pvclock_wc.nsec;
+-		__asm__ ("mfence" ::: "memory");
++
+ 	} while ((pvclock_wc.version & 1) || (pvclock_wc.version != version));
+
+ 	return wc_boot;
+@@ -115,37 +107,16 @@ static uint64_t pvclock_read_wall_clock(void)
+
+ int pvclock_init(void) {
+     uint32_t eax, ebx, ecx, edx;
+-    uint32_t msr_kvm_system_time, msr_kvm_wall_clock;
+-
++
+     /*
+      * Prefer new-style MSRs, and bail entirely if neither is indicated as
+      * available by CPUID.
+      */
+     x86_cpuid(0x40000001, &eax, &ebx, &ecx, &edx);
+-    if (eax & (1 << 3)) {
+-        msr_kvm_system_time = 0x4b564d01;
+-        msr_kvm_wall_clock = 0x4b564d00;
+-    }
+-    else if (eax & (1 << 0)) {
+-        msr_kvm_system_time = 0x12;
+-        msr_kvm_wall_clock = 0x11;
+-    }
+-    else {
+-        return 1;
+-    }
++
+
+     printf("Solo5: Clock source: KVM paravirtualized clock\n");
+
+-    __asm__ __volatile("wrmsr" ::
+-        "c" (msr_kvm_system_time),
+-        "a" ((uint32_t)((uintptr_t)&pvclock_ti | 0x1)),
+-        "d" ((uint32_t)((uintptr_t)&pvclock_ti >> 32))
+-    );
+-    __asm__ __volatile("wrmsr" ::
+-        "c" (msr_kvm_wall_clock),
+-        "a" ((uint32_t)((uintptr_t)&pvclock_wc)),
+-        "d" ((uint32_t)((uintptr_t)&pvclock_wc >> 32))
+-    );
+     /* Initialise epoch offset using wall clock time */
+     wc_epochoffset = pvclock_read_wall_clock();
+
+diff --git a/kernel/virtio/boot.S b/kernel/virtio/boot.S
+index 2de6bc5..4a099ba 100644
+--- a/kernel/virtio/boot.S
++++ b/kernel/virtio/boot.S
+@@ -31,29 +31,6 @@
+ #define ENTRY(x) .text; .globl x; .type x,%function; x:
+ #define END(x)   .size x, . - x
+
+-#define MYMULTIBOOT_FLAGS \
+-    (MULTIBOOT_PAGE_ALIGN | MULTIBOOT_MEMORY_INFO | MULTIBOOT_AOUT_KLUDGE)
+-
+-.section .bootstrap, "ax"
+-
+-.code32
+-
+-.align 4
+-bootstrap:
+-.long MULTIBOOT_HEADER_MAGIC
+-.long MYMULTIBOOT_FLAGS
+-.long -(MULTIBOOT_HEADER_MAGIC+MYMULTIBOOT_FLAGS)
+-.long bootstrap
+-.long 0x100000
+-.long _edata
+-.long _ebss
+-.long _start
+-
+-.data
+-
+-.space 4096
+-bootstack:
+-
+ /*
+  * Bootloader entry point.
+  *
+@@ -63,126 +40,16 @@ bootstack:
+  * we've switched to long mode.
+  */
+ ENTRY(_start)
+-	cld
+-	movl $bootstack, %esp
+-
+-	/* save multiboot info pointer at top of stack, we pop it in 64bit */
+-	pushl $0
+-	pushl %ebx
+-
+-	/* only multiboot is supported for now */
+-	cmpl $MULTIBOOT_BOOTLOADER_MAGIC, %eax
+-	jne nomultiboot
+-
+-	lgdt (gdt64_ptr)
+-	pushl $0x0
+-	pushw $0x10
+-	pushl $1f
+-	lret
+-
+-1:	movl $0x18, %eax
+-	movl %eax, %ds
+-	movl %eax, %es
+-	movl %eax, %ss
+-
+-	xorl %eax, %eax
+-	movl %eax, %fs
+-	movl %eax, %gs
+-
+-	/*
+-	 * x86_64 switch to long mode
+-	 */
+-
+-	/* 1: enable pae and sse */
+-	movl %cr4, %eax
+-	orl $0x620, %eax
+-	movl %eax, %cr4
+-
+-	/* 2: enable long mode */
+-	movl $0xc0000080, %ecx
+-	rdmsr
+-	movl $0x100, %eax
+-	wrmsr
+-
+-	/* 3: load pml4 pointer */
+-	movl $cpu_pml4, %eax
+-	movl %eax, %cr3
+-
+-	/* 4: enable paging */
+-	movl %cr0, %eax
+-	orl $0x80010001, %eax
+-	movl %eax, %cr0
+-
+-	/* 5: poetically longjump to longmode */
+-	pushw $0x08
+-	pushl $_start64
+-	lret
+-
+-	/* NOTREACHED */
+-	jmp haltme
+-
+-nomultiboot:
+-
+-haltme:
+-	cli
+-	hlt
+-	jmp haltme
++    nop
++    ret
+ END(_start)
+
+-#include "pagetable.S"
+-
+-/*
+- * amd64 programmer's manual:
+- *
+- * "In long mode, segmentation is not used ... except for a few exceptions."
+- *
+- * Uuuyea, exceptions.
+- */
+-
+-.data
+-.align 64
+-.globl cpu_gdt64
+-cpu_gdt64:
+-	.quad 0x0000000000000000
+-	.quad 0x00af9b000000ffff	/* 64bit CS		*/
+-	.quad 0x00cf9b000000ffff	/* 32bit CS		*/
+-	.quad 0x00cf93000000ffff	/* DS			*/
+-	.quad 0x0000000000000000	/* TSS part 1 (via C)	*/
+-	.quad 0x0000000000000000	/* TSS part 2 (via C)	*/
+-gdt64_end:
+-.align 64
+-
+-.type gdt64_ptr, @object
+-gdt64_ptr:
+-	.word gdt64_end-cpu_gdt64-1
+-	.quad cpu_gdt64
+-
+-.code64
+-
+ ENTRY(_start64)
+-	movq $bootstack, %rsp
+-	xorq %rbp, %rbp
+-
+-	/* read multiboot info pointer */
+-	movq -8(%rsp), %rdi
+-
+-	pushq $0x0
+-	pushq $0x0
+-
+-	call kernel_main
+-
+-	cli
+-	hlt
++    nop
++    ret
+ END(_start64)
+
+ ENTRY(bounce_stack)
+-	movq %rdi, %rsp
+-
+-	pushq $0x0
+-	pushq $0x0
+-
+-	call *%rsi
+-
+-	cli
+-	hlt
++    nop
++    ret
+ END(bounce_stack)
+diff --git a/kernel/virtio/tscclock.c b/kernel/virtio/tscclock.c
+index 43293bd..7abf6fd 100644
+--- a/kernel/virtio/tscclock.c
++++ b/kernel/virtio/tscclock.c
+@@ -255,6 +255,7 @@ void cpu_block(uint64_t until) {
+      */
+     delta_ns = until - now;
+     delta_ticks = mul64_32(delta_ns, pit_mult);
++#if 0
+     if (delta_ticks < PIT_MIN_DELTA) {
+         /*
+          * Since we are "spinning", quickly enable interrupts in
+@@ -267,7 +268,7 @@ void cpu_block(uint64_t until) {
+             "cli;\n");
+         return;
+     }
+-
++#endif
+     /*
+      * Program the timer to interrupt the CPU after the delay has expired.
+      * Maximum timer delay is 65535 ticks.
+@@ -295,9 +296,11 @@ void cpu_block(uint64_t until) {
+      */
+      d = intr_depth;
+      intr_depth = 0;
++#if 0
+      __asm__ __volatile__(
+          "sti;\n"
+          "hlt;\n"
+          "cli;\n");
++#endif
+      intr_depth = d;
+ }
+diff --git a/solo5-kernel-ukvm.opam b/solo5-kernel-ukvm.opam
+index 1d3e3ce..ede3396 100644
+--- a/solo5-kernel-ukvm.opam
++++ b/solo5-kernel-ukvm.opam
+@@ -27,5 +27,5 @@ depexts: [
+ ]
+
+ available: [
+-  ocaml-version >= "4.02.3" & arch = "x86_64" & os = "linux"
++  ocaml-version >= "4.02.3" & (arch = "x86_64" | arch = "arm64") & os = "linux"
+ ]
+diff --git a/ukvm/ukvm-core.c b/ukvm/ukvm-core.c
+index 71b2f32..f461c2c 100644
+--- a/ukvm/ukvm-core.c
++++ b/ukvm/ukvm-core.c
+@@ -35,7 +35,6 @@
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <linux/const.h>
+-#include <asm/msr-index.h>
+ #include <elf.h>
+ #include <errno.h>
+ #include <assert.h>
+@@ -293,64 +292,23 @@ out_invalid:
+
+ static void setup_system_64bit(struct kvm_sregs *sregs)
+ {
+-    sregs->cr0 |= X86_CR0_PE;
+-    sregs->efer |= EFER_LME;
++    if (sregs)
++        return;
+ }
+
+
+ static void setup_system_page_tables(struct kvm_sregs *sregs, uint8_t *mem)
+ {
+-    uint64_t *pml4 = (uint64_t *) (mem + BOOT_PML4);
+-    uint64_t *pdpte = (uint64_t *) (mem + BOOT_PDPTE);
+-    uint64_t *pde = (uint64_t *) (mem + BOOT_PDE);
+-    uint64_t paddr;
+-
+-    /*
+-     * For simplicity we currently use 2MB pages and only a single
+-     * PML4/PDPTE/PDE.  Sanity check that the guest size is a multiple of the
+-     * page size and will fit in a single PDE (512 entries).
+-     */
+-    assert((GUEST_SIZE & (GUEST_PAGE_SIZE - 1)) == 0);
+-    assert(GUEST_SIZE <= (GUEST_PAGE_SIZE * 512));
+-
+-    memset(pml4, 0, 4096);
+-    memset(pdpte, 0, 4096);
+-    memset(pde, 0, 4096);
+-
+-    *pml4 = BOOT_PDPTE | (X86_PDPT_P | X86_PDPT_RW);
+-    *pdpte = BOOT_PDE | (X86_PDPT_P | X86_PDPT_RW);
+-    for (paddr = 0; paddr < GUEST_SIZE; paddr += GUEST_PAGE_SIZE, pde++)
+-        *pde = paddr | (X86_PDPT_P | X86_PDPT_RW | X86_PDPT_PS);
+-
+-    sregs->cr3 = BOOT_PML4;
+-    sregs->cr4 |= X86_CR4_PAE;
+-    sregs->cr0 |= X86_CR0_PG;
++    if (sregs && mem)
++        return;
+ }
+
+ static void setup_system_gdt(struct kvm_sregs *sregs,
+                              uint8_t *mem,
+                              uint64_t off)
+ {
+-    uint64_t *gdt = (uint64_t *) (mem + off);
+-    struct kvm_segment data_seg, code_seg;
+-
+-    /* flags, base, limit */
+-    gdt[BOOT_GDT_NULL] = GDT_ENTRY(0, 0, 0);
+-    gdt[BOOT_GDT_CODE] = GDT_ENTRY(0xA09B, 0, 0xFFFFF);
+-    gdt[BOOT_GDT_DATA] = GDT_ENTRY(0xC093, 0, 0xFFFFF);
+-
+-    sregs->gdt.base = off;
+-    sregs->gdt.limit = (sizeof(uint64_t) * BOOT_GDT_MAX) - 1;
+-
+-    GDT_TO_KVM_SEGMENT(code_seg, gdt, BOOT_GDT_CODE);
+-    GDT_TO_KVM_SEGMENT(data_seg, gdt, BOOT_GDT_DATA);
+-
+-    sregs->cs = code_seg;
+-    sregs->ds = data_seg;
+-    sregs->es = data_seg;
+-    sregs->fs = data_seg;
+-    sregs->gs = data_seg;
+-    sregs->ss = data_seg;
++    if (sregs && mem && off)
++        return;
+ }
+
+ static void setup_system(int vcpufd, uint8_t *mem)
+@@ -372,6 +330,13 @@ static void setup_system(int vcpufd, uint8_t *mem)
+         err(1, "KVM: ioctl (SET_SREGS) failed");
+ }
+
++struct kvm_cpuid2 {
++	uint8_t nent;
++	uint8_t padding;
++	uint8_t *entries;
++};
++#define KVM_GET_SUPPORTED_CPUIDxxx 0x123
++#define KVM_SET_CPUID2xxx 0x124
+
+ static void setup_cpuid(int kvm, int vcpufd)
+ {
+@@ -382,20 +347,17 @@ static void setup_cpuid(int kvm, int vcpufd)
+                           max_entries * sizeof(*kvm_cpuid->entries));
+     kvm_cpuid->nent = max_entries;
+
+-    if (ioctl(kvm, KVM_GET_SUPPORTED_CPUID, kvm_cpuid) < 0)
++    if (ioctl(kvm, KVM_GET_SUPPORTED_CPUIDxxx, kvm_cpuid) < 0)
+         err(1, "KVM: ioctl (GET_SUPPORTED_CPUID) failed");
+
+-    if (ioctl(vcpufd, KVM_SET_CPUID2, kvm_cpuid) < 0)
++    if (ioctl(vcpufd, KVM_SET_CPUID2xxx, kvm_cpuid) < 0)
+         err(1, "KVM: ioctl (SET_CPUID2) failed");
+ }
+
+ void ukvm_port_puts(uint8_t *mem, uint64_t paddr)
+ {
+-    GUEST_CHECK_PADDR(paddr, GUEST_SIZE, sizeof (struct ukvm_puts));
+-    struct ukvm_puts *p = (struct ukvm_puts *)(mem + paddr);
+-
+-    GUEST_CHECK_PADDR(p->data, GUEST_SIZE, p->len);
+-    assert(write(1, mem + p->data, p->len) != -1);
++    if (paddr && mem)
++        return;
+ }
+
+ void ukvm_port_poll(uint8_t *mem, uint64_t paddr)
+@@ -449,8 +411,7 @@ static int vcpu_loop(struct kvm_run *run, int vcpufd, uint8_t *mem)
+                 ret = ioctl(vcpufd, KVM_GET_REGS, &regs);
+                 if (ret == -1)
+                     err(1, "KVM: ioctl (GET_REGS) failed after guest fault");
+-                errx(1, "KVM: host/guest translation fault: rip=0x%llx",
+-                        regs.rip);
++                errx(1, "KVM: host/guest translation fault");
+             }
+             else
+                 err(1, "KVM: ioctl (RUN) failed");
+@@ -670,14 +631,7 @@ int main(int argc, char **argv)
+      * Arguments to the kernel main are passed using the x86_64 calling
+      * convention: RDI, RSI, RDX, RCX, R8, and R9
+      */
+-    struct kvm_regs regs = {
+-        .rip = elf_entry,
+-        .rax = 2,
+-        .rbx = 2,
+-        .rflags = 0x2,
+-        .rsp = GUEST_SIZE - 8,  /* x86_64 ABI requires ((rsp + 8) % 16) == 0 */
+-        .rdi = BOOT_INFO,       /* size arg in kernel main */
+-    };
++    struct kvm_regs regs;
+     ret = ioctl(vcpufd, KVM_SET_REGS, &regs);
+     if (ret == -1)
+         err(1, "KVM: ioctl (SET_REGS) failed");
+--
+2.7.4
+
