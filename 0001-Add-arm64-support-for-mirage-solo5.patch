@@ -1,0 +1,41 @@
+From def46111fb7ee1ca70f3febe0e353449fb09d398 Mon Sep 17 00:00:00 2001
+From: Wei Chen <Jedix81@live.com>
+Date: Mon, 9 Jan 2017 02:35:02 +0000
+Subject: [PATCH] mirage-solo5 temp patch for ARM64
+
+Signed-off-by: Wei Chen <Jedix81@live.com>
+---
+ lib/bindings/barrier_stubs.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/lib/bindings/barrier_stubs.c b/lib/bindings/barrier_stubs.c
+index 3e2e027..d49a7cc 100644
+--- a/lib/bindings/barrier_stubs.c
++++ b/lib/bindings/barrier_stubs.c
+@@ -30,13 +30,23 @@
+ #include <mini-os/os.h>
+ #endif
+ 
++#if 0
+ #define mb()    __asm__ __volatile__ ("mfence":::"memory")
+ #define rmb()   __asm__ __volatile__ ("lfence":::"memory")
+ #define wmb()	__asm__ __volatile__ ("sfence" ::: "memory") /* From CONFIG_UNORDERED_IO (linux) */
+ 
++#else
++
++#define mb()
++#define rmb()
++#define wmb()
++
++#endif
++
+ #define xen_mb() mb()
+ #define xen_wmb() wmb()
+ 
++
+ CAMLprim value
+ caml_memory_barrier()
+ {
+-- 
+2.7.4
+
